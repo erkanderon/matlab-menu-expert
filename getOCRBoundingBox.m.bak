@@ -1,0 +1,309 @@
+% getOCRBoundingBox: Given an image, which may be slightly rotated (within -90deg to
+% 90deg, return all bounding boxes with respective OCR texts
+% Note: the given image has to be in RGB space
+function ocrBoundingBox = getOCRBoundingBox(img, showProcess, imgSrcType) 
+
+    't_rotation start!'
+    tic;
+    % Find angle of rotation and rotate back
+    bestDeg = findRotationFast(img, 10, showProcess, ratio);
+    img = imrotate(img, bestDeg);
+    t_rotation = toc
+    
+    't_ImgSeg_A start!'
+    tic;
+    % Change the image to grayscale
+    origGray = rgb2gray(img);
+    
+    % Perform Otsu thresholding (text = black)
+    BW = getOtsu(origGray); 
+    t_ImgSeg_A = toc
+    figure(300);
+    imshow(BW);
+    
+    % Find bounding boxes
+    ocrBoundingBox = internalGetOCRBoundingBox(BW, origGray, showProcess, ratio);
+    
+    % Remove non-English character text in ocrBoundingBox, change all to
+    % lowercase characters
+    for i=1:length(ocrBoundingBox)
+        str = ocrBoundingBox{i}{5};
+        str(~isstrprop(str,'alpha')) = '';
+        ocrBoundingBox{i}{5} = lower(str);
+    end
+end
+
+% internalGetOCRBoundingBox
+% Given the Otsu threshold BW (black for text) and the gray scale image
+% returnt the struct that contains structs of bounding boxes with
+% corresponding OCR texts.
+function ocrBoundingBox = internalGetOCRBoundingBox(BW, origGray, showProcess, ratio)
+    
+    't_ImgSeg_B start!'
+    tic;
+    dilatedBW = lineDilate(1-BW, ratio);
+    [m, n] = size(origGray);
+
+    CC = bwconncomp(dilatedBW); 
+    s = regionprops(CC,'basic');
+    centroids = cat(1, s.Centroid);
+    boundingBoxes = cat(1, s.BoundingBox);
+
+    % Remove Bounding Boxes too small or too large
+    boundingBoxes = removeAreaOutlierBoundingBoxes(boundingBoxes);
+
+    % Merge Bounding Boxes
+%    boundingBoxes = mergeBoundingBox(boundingBoxes, 60, 15);
+    boundingBoxes = mergeBoundingBox(boundingBoxes, round(20/ratio), round(30/ratio)); % 20, 30 for Ray's image
+
+    % Remove Bounding Boxes with weird aspect ratios
+    boundingBoxes = removeAspectRatioOutlierBoundingBoxes(boundingBoxes);
+    
+    % This struct contains structs of {x, y, width, height, text} of a ocr
+    % and bounding box information
+    ocrBoundingBox = cell(size(boundingBoxes,1), 1);
+    t_ImgSeg_B = toc
+    
+    if showProcess
+        figure(301);
+        imshow(BW/3);
+        hold on
+    end
+    
+    't_OCR start!'
+    tic;
+    for i=1:size(boundingBoxes,1)        
+        d = 3;
+        box = boundingBoxes(i,:);
+        box(1) = max(box(1)-d, 1);
+        box(2) = max(box(2)-d, 1);
+        box(3) = min(box(1) + box(3) + 2*d, n) - box(1);
+        box(4) = min(box(2) + box(4) + 2*d, m) - box(2);
+        roiArea = getROI(origGray, box);
+        result = ocr(roiArea);
+        if showProcess
+            text(boundingBoxes(i,1), boundingBoxes(i,2)+boundingBoxes(i,4), result.Text, 'Color', 'r', 'FontSize', 14);
+        end
+        ocrBoundingBox{i} = {box(1), box(2), box(3), box(4), result.Text};
+    end
+    t_OCR = toc
+    if showProcess
+        hold off
+    end
+
+    if showProcess
+        figure(302);
+        imshow(BW)
+        hold on
+        plot(centroids(:,1),centroids(:,2), 'b*');
+        for i=1:size(boundingBoxes,1)
+            rectangle('Position',boundingBoxes(i,:), 'EdgeColor','r');
+        end
+        hold off
+    end
+end
+
+function bestDeg = findRotationFast(origColor, d_deg, showProcess, ratio)
+    origGray = rgb2gray(origColor);
+    BW = 1-getOtsu(origGray);
+    
+    BWcopy = diskDilate(BW, ratio);
+    figure;
+    imshow(BWcopy);
+    
+    min_deg = -90;
+    total_deg = 180;
+    coarse_degs = min_deg:d_deg:min_deg+total_deg;
+    n_coarse_degs = length(coarse_degs);
+    
+    fig_base = 200; % for rotation demo
+    aspects = zeros(1,2);
+    bestCoarseDeg = -1;
+    bestCoarseAveAspect = -1;
+    for i = 1:n_coarse_degs
+        deg = coarse_degs(i);
+        
+        % rotate and find bounding boxes
+        BW = imrotate(BWcopy, deg);
+        CC = bwconncomp(BW); 
+        s = regionprops(CC,'basic');
+        boundingBoxes = cat(1, s.BoundingBox);
+
+        if showProcess
+            figure(fig_base+i);
+            imshow(BW/3)
+            hold on
+            for j=1:size(boundingBoxes,1)
+                rectangle('Position',boundingBoxes(j,:), 'EdgeColor','r');
+            end
+            hold off
+            title_str = sprintf('Rotation %d degree', deg);
+            title(title_str);
+        end
+    
+        aveAspect = findMeanAspectRatio(boundingBoxes);
+        aspects(i,:) = [deg, aveAspect];
+        if (aveAspect > bestCoarseAveAspect)
+            bestCoarseAveAspect = aveAspect;
+            bestCoarseDeg = deg;
+        end
+        fprintf('%d deg, mean aspect ratio = %f\n', deg, aveAspect);
+    end
+    close(fig_base+(1:n_coarse_degs)); % tried ok with command window
+    fprintf('Best Coarse deg %d deg, mean aspect ratio = %f\n', bestCoarseDeg, bestCoarseAveAspect);
+    
+    bestDeg = -1;
+    bestAveAspect = -1;
+    for i=-d_deg:d_deg
+        deg = mod(bestCoarseDeg + i - min_deg, total_deg) + min_deg;
+        
+        % rotate and find bounding boxes
+        BW = imrotate(BWcopy, deg);
+        CC = bwconncomp(BW); 
+        s = regionprops(CC,'basic');
+        boundingBoxes = cat(1, s.BoundingBox);
+
+        aveAspect = findMeanAspectRatio(boundingBoxes);
+        if (aveAspect > bestAveAspect)
+            bestAveAspect = aveAspect;
+            bestDeg = deg;
+        end
+        fprintf('%d deg, mean aspect ratio = %f\n', deg, aveAspect);
+    end
+        
+    fprintf('best deg = %d deg, mean aspect ratio = %f\n', bestDeg, bestAveAspect);
+end
+
+function aveAspect = findMeanAspectRatio(boundingBoxes)
+    aveAspect = mean(boundingBoxes(:,3)./boundingBoxes(:,4));
+end
+
+function [aveAspect, stdAspect, medianAspect] = findAspectRatio(boundingBoxes) 
+    aspectRatios = boundingBoxes(:,3)./boundingBoxes(:,4);
+    aveAspect = mean(aspectRatios);
+    stdAspect = std(aspectRatios);
+    medianAspect = median(aspectRatios);
+end
+
+function boundingBoxes = removeAspectRatioOutlierBoundingBoxes(boundingBoxes)
+    nBoundingBox = size(boundingBoxes, 1);
+    ratios = boundingBoxes(:,3)./boundingBoxes(:,4);
+    median_ratio = median(ratios(ratios > 1));
+    std_ratio = std(ratios);
+    
+    % Keep inliers
+    inliers = [];
+    for i=1:nBoundingBox
+%         if (ratios(i) < median_ratio + std_ratio && ratios(i) > median_ratio - std_ratio)
+        if (ratios(i) > max(median_ratio - 2*std_ratio, 1))
+           inliers = [inliers, i];
+        end
+    end
+    
+    boundingBoxes = boundingBoxes(inliers, :);
+end
+
+function boundingBoxes = removeAreaOutlierBoundingBoxes(boundingBoxes)
+    nBoundingBox = size(boundingBoxes, 1);
+    areas = boundingBoxes(:,3).*boundingBoxes(:,4);
+    median_area = median(areas);
+    std_area = std(areas);
+    
+    % Keep inliers
+    inliers = [];
+    for i=1:nBoundingBox
+        if (areas(i) < median_area + std_area && areas(i) > median_area - std_area)
+           inliers = [inliers, i];
+        end
+    end
+    
+    boundingBoxes = boundingBoxes(inliers, :);
+end
+
+function mergedBoundingBox = mergeBoundingBox(boundingBoxes, dx, dy)
+    boundingBoxes = sortrows(boundingBoxes, 2);
+    nBoundingBox = size(boundingBoxes, 1);
+    CC_index = 1:nBoundingBox;
+    for i=1:nBoundingBox
+        box_i = boundingBoxes(i,:);
+        for j=i+1:nBoundingBox
+           box_j = boundingBoxes(j,:);
+           if (abs(box_i(2) - box_j(2)) > dy)
+               break;
+           end
+           if (abs(box_i(1)+box_i(3)-box_j(1)) < dx || ... % close
+               abs(box_i(1)-(box_j(1)+box_j(3))) < dx || ...
+               (box_i(1)+box_i(3) > box_j(1) && box_i(1) < box_j(1)) ||... % overlap 
+               (box_i(1) < box_j(1)+box_j(3) && box_i(1)+box_i(3) > box_j(1)+box_j(3)))
+                min_index = min(CC_index(i), CC_index(j));
+                CC_index(i) = min_index;
+                CC_index(j) = min_index;
+           end
+        end
+    end
+    
+    % Update bounding box size based on CC index
+    minMaxXY = repmat([realmax, realmax, -1, -1], nBoundingBox, 1);
+    used_CC_ind = zeros(nBoundingBox, 1);
+    
+    for i=1:nBoundingBox
+        cur_cc_ind = CC_index(i);
+        used_CC_ind(cur_cc_ind) = 1;
+        cur_min_x = boundingBoxes(i, 1);
+        cur_min_y = boundingBoxes(i, 2);
+        cur_max_x = cur_min_x + boundingBoxes(i, 3);
+        cur_max_y = cur_min_y + boundingBoxes(i, 4);
+        if (cur_min_x < minMaxXY(cur_cc_ind, 1))
+            minMaxXY(cur_cc_ind, 1) = cur_min_x;
+        end
+        if (cur_min_y < minMaxXY(cur_cc_ind, 2))
+            minMaxXY(cur_cc_ind, 2) = cur_min_y;
+        end
+        if (cur_max_x > minMaxXY(cur_cc_ind, 3))
+            minMaxXY(cur_cc_ind, 3) = cur_max_x;
+        end
+        if (cur_max_y > minMaxXY(cur_cc_ind, 4))
+            minMaxXY(cur_cc_ind, 4) = cur_max_y;
+        end
+    end
+    
+    minMaxXY = minMaxXY(find(used_CC_ind),:);
+    mergedBoundingBox = minMaxXY;
+    mergedBoundingBox(:,3) = minMaxXY(:,3) - minMaxXY(:,1);
+    mergedBoundingBox(:,4) = minMaxXY(:,4) - minMaxXY(:,2);
+end
+
+function dilated = lineDilate(img, ratio) 
+    se = strel('rectangle', [1, round(21/ratio)]);
+    dilated = dilate(img, se, false);
+end
+
+function dialted = diskDilate(img, ratio)
+    se = strel('disk', round(11/ratio)); % for Ray's image
+    dialted = dilate(img, se, false);
+end
+
+function dilated=dilate(img, se, removeNoise)
+    if (removeNoise)
+        % Total signal
+        total = sum(img(:));
+        img_copy = img;
+
+        % Remove noise
+        s_noise = strel('disk', 3);
+        img = imopen(img, s_noise);
+
+        % Check if too much signal is removed
+        total_reduced = sum(img(:));
+        if (total_reduced / total < 0.8)
+            img = img_copy;
+        end
+    end
+    
+    % Dilate white text
+    dilated = imdilate(img, se);
+end
+
+function roiArea = getROI(img, boundingBox)
+    roiArea = img(boundingBox(2):boundingBox(2)+boundingBox(4)-1, boundingBox(1):boundingBox(1)+boundingBox(3)-1);
+end

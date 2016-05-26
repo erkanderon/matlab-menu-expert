@@ -1,0 +1,15 @@
+% function [imgo] = captureImage(type)
+% type:
+% 1: webcam
+% 2: test image
+
+function imgo = captureImage(type)
+
+    if (type == 1)
+        
+    
+    
+    end
+
+
+end

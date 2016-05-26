@@ -1,0 +1,31 @@
+bounding box of 3 lines
+
+% webcam
+sz_imgCp =
+
+    90   228     3
+
+% photo
+sz_imgCp =
+
+   312   780     3
+
+Trial>> (312/90)
+
+ans =
+
+    3.4667
+
+Trial>> (780/228)
+
+ans =
+
+    3.4211
+    
+    
+Trial>> ((312/90)+(780/228))/2
+
+ans =
+
+    3.4439
+--> take this as the ratio
